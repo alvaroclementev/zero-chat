@@ -7,13 +7,18 @@ como es Github.
 
 ## Instalación
 ```{bash}
-git clone *URL*
+git clone https://github.com/alvaroclementev/zero-chat.git
 cd directorio
 java ./run
 ```
 
 ## Ejemplo de uso
+Para iniciar el servidor (es necesario tener python3 instalado, probablemente python3.7+):
 
+```{bash}
+cd zero-server
+./server.py
+```
 
 Aviso:
 Este no es un servicio de chat real en ningun caso. No enviar ningun mensaje que se considere privado,
