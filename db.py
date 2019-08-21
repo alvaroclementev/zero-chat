@@ -1,0 +1,177 @@
+'''
+This is an abstraction module to handle any DB connection 
+
+For now we are using SQLite as it is self-contained and does
+not require any external software installed
+
+For this toy application maybe this is not needed since we do not
+need any persisten storage?
+
+For now the structure of this DB is going to be the SIMPLEST POSSIBLE:
+TABLE users:
+ username (TEXT) PK
+
+TABLE rooms:
+ room (TEXT) | username (TEXT) both PK
+This means that a room does not exist in the database up until it has messages in it
+All the membership is done server side FIXME 
+
+TABLE joined_rooms:
+ roomname (TEXT) FK | username (TEXT) FK
+This table shows which rooms has a user joined
+
+TABLE messages:
+ id (INTEGER) | room (TEXT) | username (TEXT) | message (TEXT) | timestamp (DATETIME)
+This table stores every message, with its corresponding username, room and timestamp
+'''
+import sqlite3 as sqlite
+from datetime import datetime
+
+class DB:
+    def __init__(self):
+        self.con = sqlite.connect('db/testdb.db', 
+                detect_types=sqlite.PARSE_DECLTYPES, # To use TIMESTAMP as type later (has to be a datetime.datetime object
+                check_same_thread=False)             # Share connection between Threads
+        # Create test table
+        cur = self.con.cursor()
+        # TODO: create REAL persistence
+        cur.execute('''CREATE TABLE IF NOT EXISTS users
+                       (name text PRIMARY KEY)''')
+        cur.execute('''INSERT OR IGNORE INTO users (name)
+                       VALUES ('alvaroc'), ('test_user')''') 
+                       
+
+        cur.execute('''CREATE TABLE IF NOT EXISTS rooms
+                       (name text PRIMARY KEY)''')
+        cur.execute('''INSERT OR IGNORE INTO rooms (name) 
+                       VALUES 
+                       ('welcome'),
+                       ('random')''')
+
+        # Declare FOREIGN KEYs so we can avoid doing extra checks server-side
+        # This may cause the queries to fail? ugh...
+        cur.execute('''CREATE TABLE IF NOT EXISTS messages
+                       (id INTEGER PRIMARY KEY,
+                        roomname TEXT,
+                        username TEXT,
+                        message  TEXT,
+                        timestamp TIMESTAMP,
+                        FOREIGN KEY (username) REFERENCES users(name), 
+                        FOREIGN KEY (roomname) REFERENCES rooms(name))''')
+        cur.execute('''CREATE TABLE IF NOT EXISTS joined_rooms
+                       (username TEXT,
+                        roomname TEXT,
+                        PRIMARY KEY (username, roomname), 
+                        FOREIGN KEY (username) REFERENCES users (name),
+                        FOREIGN KEY (roomname) REFERENCES rooms (name));''')
+        self.con.commit()
+
+    def test(self):
+        cur = self.con.cursor()
+        cur.execute('SELECT SQLITE_VERSION()')
+        data = cur.fetchone()[0]
+        print('SQLite version:', data)
+    
+    def get_joined_rooms(self, user):
+        ''' Returns all the rooms the user has joined'''
+        cur = self.con.cursor()
+        cur.execute('''SELECT roomname 
+                       FROM joined_rooms
+                       WHERE username = ?
+                    ''', user)
+        rooms = [room for room, _ in cur.fetchall()]
+        return rooms
+
+    ### Users ###
+    def get_users(self):
+        ''' Returns all the users from the DB'''
+        cur = self.con.cursor()
+        cur.execute('''SELECT * FROM users''')
+        # cur.fetchall returns a tuple of the same shape as the table shape
+        # in this case (name,)
+        users = [user for user, in cur.fetchall()]
+        return users
+
+    def create_user(self, user):
+        '''Create a new user'''
+        print(f'Create user received {user} as user')
+        cur = self.con.cursor()
+        try:
+            cur.execute('''INSERT INTO users (name)
+                       VALUES (?)''', (user,))
+            self.con.commit()
+        except sqlite.Error as e:
+            print(f'Error creating user {user}: {e}')
+            return False
+        return True
+
+    def delete_user(self, user):
+        '''Delete a user from the database'''
+        cur = self.con.cursor()
+        try:
+            cur.execute('''DELETE FROM users WHERE name = ?''', (user,))
+            self.con.commit() # Not needed? No time to check
+        except sqlite.Error as e:
+            print(f'Error deleting user {user}: {e}')
+
+    ### Rooms ###
+    def get_rooms(self):
+        ''' Returns all the available rooms'''
+        cur = self.con.cursor()
+        cur.execute('''SELECT * FROM rooms''')
+        rooms = [room for room, in cur.fetchall()]
+        return rooms
+
+    def create_room(self, room):
+        '''Create a new room'''
+        print(f'Create room received {room} as room')
+        cur = self.con.cursor()
+        try:
+            cur.execute('''INSERT INTO rooms (name)
+                       VALUES (?)''', (room,))
+            self.con.commit()
+        except sqlite.Error as e:
+            print(f'Error creating room {room}: {e}')
+            return False
+        return True
+
+    def delete_room(self, room):
+        '''Delete a room from the database'''
+        cur = self.con.cursor()
+        try:
+            cur.execute('''DELETE FROM rooms WHERE name = ?''', (room,))
+            self.con.commit() # Not needed? No time to check
+        except sqlite.Error as e:
+            print(f'Error deleting room {room}: {e}')
+
+    def join_room(self, user, room):
+        '''Joins the user to the room'''
+        cur = self.con.cursor()
+        try:
+            cur.execute('''INSERT INTO joined_rooms (username, roomname) 
+                       VALUES (?, ?)''', (user, room))
+            self.con.commit()
+        except sqlite.Error as e:
+            print(f'Error joining user {user} into room {room}: {e}')
+            return False
+        return True
+
+
+    def close(self):
+        self.con.close()
+            
+
+db = None 
+def init_db():
+    '''
+    this function creates the SQLite 
+    '''
+    db = DB()
+    db.test()
+    print(db.get_users())
+    print(db.get_rooms())
+    db.close()
+
+# Test
+if __name__ == '__main__':
+    init_db()
