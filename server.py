@@ -17,6 +17,7 @@ NOT_FOUND_ERROR = 404
 ALREADY_EXISTS_ERROR = 409
 
 # Global objects
+# FIXME: Use an Application Context here to thread safely use these caches
 db = DB()
 cached_users = None
 cached_rooms = None
