@@ -24,3 +24,6 @@ hs_err_pid*
 
 # Python too
 __pycache__/
+
+# Custom
+db/testdb.db

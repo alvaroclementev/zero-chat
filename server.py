@@ -4,10 +4,11 @@ This is the server running in a daemon process in a remote server
 This is an example of a python program
 
 NOTE: This is not optimized whatsoever, it's just for teaching purposes
-This resembles a REST API, but does not necessarily adhere to the spec, 
+This resembles a REST API, but does not necessarily adhere to the spec,
 this is quick and dirty
 '''
-from flask import Flask, jsonify, abort, make_response, escape
+from flask import Flask, jsonify, request, abort, make_response, escape
+from collections import namedtuple
 from datetime import datetime
 from db import DB
 app = Flask(__name__)
@@ -15,13 +16,19 @@ app = Flask(__name__)
 UNAUTHORIZED_ERROR = 401
 NOT_FOUND_ERROR = 404
 ALREADY_EXISTS_ERROR = 409
+UNPROCESSABLE_ENTITY_ERROR = 422
+INTERNAL_SERVER_ERROR = 500
+
+# named tuple as message?
+# Fields: id room user contents timestamp
+Message = namedtuple('Message', ['id', 'roomname', 'username', 'contents', 'timestamp'])
 
 # Global objects
 # FIXME: Use an Application Context here to thread safely use these caches
 db = DB()
-cached_users = None
-cached_rooms = None
-cached_messages = None
+cached_users = None    # Just a set with all the users for quick membership check
+cached_rooms = None    # A dict with rooms as keys and a set of joined users as values
+cached_messages = None # A dict with rooms as keys and list of messages as values
 
 def init_cache():
     ''' Initialize the cache '''
@@ -29,10 +36,24 @@ def init_cache():
     global cached_rooms
     # global cached_messages
     cached_users = set(db.get_users())
-    cached_rooms = set(db.get_rooms())
+
+    # Init the rooms cache
+    cached_rooms = {room: set() for room in db.get_rooms()}
+    for room in cached_rooms: # FIXME: This can be done faster directly in a SQL Join
+        joined_users = db.get_joined_users(room)
+        for username in joined_users:
+            if username in cached_users:
+                cached_rooms[room].add(username)
+            else:
+                # WTF should not happen, since it's forced by FK?
+                print('INIT ERROR: Joined user not in Cached Users?')
+                return False
+    # TODO: Init the messages cache
+    return True
+
 
 @app.route("/")
-def main():
+def root():
     return "These are not the messages you are looking for..."
 
 @app.route("/admin")
@@ -49,6 +70,7 @@ def json_test():
         'test3': "Hello"}
         })
 
+
 ### Users ###
 @app.route("/user/list")
 def list_users():
@@ -64,22 +86,98 @@ def create_user(username, methods=['POST']):
     elif not db.create_user(username):
         abort(ALREADY_EXISTS_ERROR) # Probably bad, 'cause other error could occur, whatever...
     else:
-        cached_users.add(username)  # Crated user, store it in the local cache
-        return jsonify({'user': username })
+        # Created user, store it in the local cache
+        cached_users.add(username)
+        # Add the user to the welcome room
+        db.join_room(username, 'welcome')
+        cached_rooms['welcome'].add(username)
+        return jsonify({username: ['welcome']})
 
 @app.route("/user/delete/<username>")
 def delete_user(username):
     ''' Deletes the username from the database '''
-    # TODO: Include some "protection" (like a "secret" code) in a URL param against trolls 
+    # TODO: Include some "protection" (like a "secret" code) in a URL param against trolls
     # trying to delete each other's accounts
     if username in cached_users:
         if not db.delete_user(username):
             abort(NOT_FOUND_ERROR)
         else:
+            # Remove from all the joined rooms
+            joined_rooms = db.get_joined_rooms(username)
+            for room in joined_rooms:
+                if room in cached_rooms:
+                    cached_rooms[room].remove(username)
+                db.leave_room(username, room)
+            # Remove user from the cache
             cached_users.remove(username)
     else:
         abort(NOT_FOUND_ERROR)
-        
+
+### Joined Rooms ###
+@app.route("/joined_room/join/<roomname>")
+def join_room(roomname):
+    ''' Join the room '''
+    # Make sure the user exists
+    username = None
+    if 'username' not in request.args:
+        abort(UNPROCESSABLE_ENTITY_ERROR) # TODO: which one was the one that returned 404?
+    else:
+        username = request.args.get('username')
+        if username not in cached_users:
+            abort(NOT_FOUND_ERROR)
+    # Now check the room
+    if roomname not in cached_rooms:
+        abort(NOT_FOUND_ERROR)
+    else:
+        success = db.join_room(username, roomname)
+        if not success:
+            abort(INTERNAL_SERVER_ERROR)
+        else:
+            # All well! Return all joined rooms from this user
+            cached_rooms[roomname].add(username)
+            rooms = db.get_joined_rooms(username)
+            return jsonify({ 'user': username, 'rooms': rooms })
+
+@app.route("/joined_room/list/<username>")
+def list_joined_rooms(username):
+    ''' Join the room '''
+    # Make sure the user exists
+    if username not in cached_users:
+        abort(NOT_FOUND_ERROR)
+    else:
+        rooms = db.get_joined_rooms(username)
+        return jsonify({ 'user': username, 'rooms': rooms })
+
+@app.route("/joined_room/leave/<roomname>")
+def leave_room(roomname):
+    # Make sure the user exists
+    username = None
+    if 'username' not in request.args:
+        abort(UNPROCESSABLE_ENTITY_ERROR) # TODO: which one was the one that returned 404?
+    else:
+        username = request.args.get('username')
+        if username not in cached_users:
+            abort(NOT_FOUND_ERROR)
+    # Now check the room
+    if roomname not in cached_rooms:
+        abort(NOT_FOUND_ERROR)
+    elif username not in cached_rooms[roomname]:
+        abort(NOT_FOUND_ERROR) # FIXME: Not the best error code, at all!
+    else:
+        success = db.leave_room(username, roomname)
+        if not success:
+            abort(INTERNAL_SERVER_ERROR)
+        else:
+            # All well! Return all joined rooms from this user
+            cached_rooms[roomname].remove(username)
+            rooms = db.get_joined_rooms(username)
+            return jsonify({ 'user': username, 'rooms': rooms })
+
+@app.route("/joined_room/all")
+def list_all_rooms():
+    rooms = [{room: list(users)} for room, users in cached_rooms.items()]
+    return jsonify(rooms)
+
 ### Rooms ###
 @app.route("/room/list")
 def list_rooms():
@@ -110,20 +208,41 @@ def delete_room(roomname):
     else:
         abort(NOT_FOUND_ERROR)
 
+### Messages ###
+@app.route("/message/get/<roomname>")
+def get_room_messages(roomname):
+    ''' Gets all the messages from a room '''
+    # FIXME: Migrate all of this to WebSocket so we can push to the client directly?
+    if roomname not in cached_rooms or roomname not in cached_messages:
+        abort(NOT_FOUND_ERROR)
+    else:
+        messages = cached_messages[rooname]  # TODO: Think about how we refresh this cache... it should be kept in sync by us manually, no need to call back to the db
+        json_messages = [{'id': message.id, 'username': message.username, 'contents': contents, 'timestamp': message.timestamp} for message in messages]
+        return jsonify({ 'roomname': roomname, 'messages': messages })
+
+# TODO: Think about a function that returns the *NEW* messages (maybe using the id variable, since it is a autoincrementing INTEGER?)
+
+
 ### Error Handlers ###
 @app.errorhandler(NOT_FOUND_ERROR)
 def error_not_found(error):
-    return make_response(jsonify({'error': 'Not found'}), NOT_FOUND_ERROR)
+    return make_response(jsonify({'code': error.code, 'description': error.description}), NOT_FOUND_ERROR)
 
 @app.errorhandler(ALREADY_EXISTS_ERROR)
 def error_already_exists(error):
-    return make_response(jsonify({'error': 'Already Exists'}), ALREADY_EXISTS_ERROR)
+    return make_response(jsonify({'code': error.code, 'description': error.description}), ALREADY_EXISTS_ERROR)
 
+@app.errorhandler(INTERNAL_SERVER_ERROR)
+def error_already_exists(error):
+    return make_response(jsonify({'code': error.code, 'description': error.description}), INTERNAL_SERVER_ERROR)
 ### Init ###
 def init_server():
     ''' This initializes the server to bootstrap the DB and some basic data '''
+    pass
 
 if __name__ == '__main__':
     print("Initializing the cache...")
-    init_cache()
+    if not init_cache():
+        print('ERROR INITIALIZING CACHE...')
+        exit(1)
     app.run(debug=True)

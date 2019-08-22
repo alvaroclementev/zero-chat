@@ -1,5 +1,5 @@
 '''
-This is an abstraction module to handle any DB connection 
+This is an abstraction module to handle any DB connection
 
 For now we are using SQLite as it is self-contained and does
 not require any external software installed
@@ -14,7 +14,7 @@ TABLE users:
 TABLE rooms:
  room (TEXT) | username (TEXT) both PK
 This means that a room does not exist in the database up until it has messages in it
-All the membership is done server side FIXME 
+All the membership is done server side FIXME
 
 TABLE joined_rooms:
  roomname (TEXT) FK | username (TEXT) FK
@@ -29,7 +29,7 @@ from datetime import datetime
 
 class DB:
     def __init__(self):
-        self.con = sqlite.connect('db/testdb.db', 
+        self.con = sqlite.connect('db/testdb.db',
                 detect_types=sqlite.PARSE_DECLTYPES, # To use TIMESTAMP as type later (has to be a datetime.datetime object
                 check_same_thread=False)             # Share connection between Threads
         # Create test table
@@ -38,32 +38,36 @@ class DB:
         cur.execute('''CREATE TABLE IF NOT EXISTS users
                        (name text PRIMARY KEY)''')
         cur.execute('''INSERT OR IGNORE INTO users (name)
-                       VALUES ('alvaroc'), ('test_user')''') 
-                       
+                       VALUES ('alvaroc'), ('test_user')''')
+
 
         cur.execute('''CREATE TABLE IF NOT EXISTS rooms
                        (name text PRIMARY KEY)''')
-        cur.execute('''INSERT OR IGNORE INTO rooms (name) 
-                       VALUES 
+        cur.execute('''INSERT OR IGNORE INTO rooms (name)
+                       VALUES
                        ('welcome'),
                        ('random')''')
 
         # Declare FOREIGN KEYs so we can avoid doing extra checks server-side
         # This may cause the queries to fail? ugh...
+        cur.execute('''CREATE TABLE IF NOT EXISTS joined_rooms
+                       (username TEXT,
+                        roomname TEXT,
+                        PRIMARY KEY (username, roomname),
+                        FOREIGN KEY (username) REFERENCES users (name),
+                        FOREIGN KEY (roomname) REFERENCES rooms (name));''')
+        cur.execute('''INSERT OR IGNORE INTO joined_rooms (username, roomname)
+                       VALUES
+                       ('alvaroc', 'welcome'),
+                       ('test_user', 'welcome')''')
         cur.execute('''CREATE TABLE IF NOT EXISTS messages
                        (id INTEGER PRIMARY KEY,
                         roomname TEXT,
                         username TEXT,
                         message  TEXT,
                         timestamp TIMESTAMP,
-                        FOREIGN KEY (username) REFERENCES users(name), 
+                        FOREIGN KEY (username) REFERENCES users(name),
                         FOREIGN KEY (roomname) REFERENCES rooms(name))''')
-        cur.execute('''CREATE TABLE IF NOT EXISTS joined_rooms
-                       (username TEXT,
-                        roomname TEXT,
-                        PRIMARY KEY (username, roomname), 
-                        FOREIGN KEY (username) REFERENCES users (name),
-                        FOREIGN KEY (roomname) REFERENCES rooms (name));''')
         self.con.commit()
 
     def test(self):
@@ -71,11 +75,11 @@ class DB:
         cur.execute('SELECT SQLITE_VERSION()')
         data = cur.fetchone()[0]
         print('SQLite version:', data)
-    
+
     def get_joined_rooms(self, user):
         ''' Returns all the rooms the user has joined'''
         cur = self.con.cursor()
-        cur.execute('''SELECT roomname 
+        cur.execute('''SELECT roomname
                        FROM joined_rooms
                        WHERE username = ?
                     ''', user)
@@ -113,6 +117,9 @@ class DB:
             self.con.commit() # Not needed? No time to check
         except sqlite.Error as e:
             print(f'Error deleting user {user}: {e}')
+            return False
+        return True
+
 
     ### Rooms ###
     def get_rooms(self):
@@ -144,11 +151,38 @@ class DB:
         except sqlite.Error as e:
             print(f'Error deleting room {room}: {e}')
 
+    def get_joined_users(self, room):
+        ''' gets all the users in the room '''
+        cur = self.con.cursor()
+        try:
+            cur.execute('''SELECT username AS name
+                           FROM joined_rooms
+                           WHERE roomname = ?''', (room,))
+            users = [user for user, in cur.fetchall()]
+            return users
+        except sqlite.Error as e:
+            print(f'Error fetching users for room: {room}: {e}')
+            return []
+
+    ### Joined Rooms ###
+    def get_joined_rooms(self, user):
+        ''' gets all the rooms this user has joined '''
+        cur = self.con.cursor()
+        try:
+            cur.execute('''SELECT roomname AS name
+                           FROM joined_rooms
+                           WHERE username = ?''', (user,))
+            rooms = [room for room, in cur.fetchall()]
+            return rooms
+        except sqlite.Error as e:
+            print(f'Error fetching joined rooms from user {user}: {e}')
+            return []
+
     def join_room(self, user, room):
         '''Joins the user to the room'''
         cur = self.con.cursor()
         try:
-            cur.execute('''INSERT INTO joined_rooms (username, roomname) 
+            cur.execute('''INSERT INTO joined_rooms (username, roomname)
                        VALUES (?, ?)''', (user, room))
             self.con.commit()
         except sqlite.Error as e:
@@ -156,15 +190,28 @@ class DB:
             return False
         return True
 
+    def leave_room(self, user, room):
+        '''Removes the user from the room'''
+        cur = self.con.cursor()
+        try:
+            cur.execute('''DELETE FROM joined_rooms
+                           WHERE username = ? AND roomname = ?''', (user, room))
+            self.con.commit()
+        except sqlite.Error as e:
+            print(f'Error deleting user {user} from room {room}: {e}')
+            return False
+        return True
+
+
 
     def close(self):
         self.con.close()
-            
 
-db = None 
+
+db = None
 def init_db():
     '''
-    this function creates the SQLite 
+    this function creates the SQLite
     '''
     db = DB()
     db.test()
