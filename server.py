@@ -8,9 +8,9 @@ This resembles a REST API, but does not necessarily adhere to the spec,
 this is quick and dirty
 '''
 from flask import Flask, jsonify, request, abort, make_response, escape
-from collections import namedtuple
+# from collections import namedtuple
 from datetime import datetime
-from db import DB
+from db import DB, Message
 app = Flask(__name__)
 
 UNAUTHORIZED_ERROR = 401
@@ -19,9 +19,6 @@ ALREADY_EXISTS_ERROR = 409
 UNPROCESSABLE_ENTITY_ERROR = 422
 INTERNAL_SERVER_ERROR = 500
 
-# named tuple as message?
-# Fields: id room user contents timestamp
-Message = namedtuple('Message', ['id', 'roomname', 'username', 'contents', 'timestamp'])
 
 # Global objects
 # FIXME: Use an Application Context here to thread safely use these caches
@@ -29,13 +26,17 @@ db = DB()
 cached_users = None    # Just a set with all the users for quick membership check
 cached_rooms = None    # A dict with rooms as keys and a set of joined users as values
 cached_messages = None # A dict with rooms as keys and list of messages as values
+room_offsets = None    # A dict with the last offset stored in the room
 
 def init_cache():
     ''' Initialize the cache '''
     global cached_users
     global cached_rooms
-    # global cached_messages
+    global cached_messages
+    global room_offsets
     cached_users = set(db.get_users())
+    cached_messages = {}
+    room_offsets = {}
 
     # Init the rooms cache
     cached_rooms = {room: set() for room in db.get_rooms()}
@@ -48,7 +49,10 @@ def init_cache():
                 # WTF should not happen, since it's forced by FK?
                 print('INIT ERROR: Joined user not in Cached Users?')
                 return False
-    # TODO: Init the messages cache
+        # Init the messages cache
+        messages = db.get_room_messages(room)
+        cached_messages[room] = messages
+        room_offsets[room] = max([message.offset for message in messages]) if messages else -1
     return True
 
 
@@ -78,8 +82,8 @@ def list_users():
     users = [{'user': user} for user in cached_users]
     return jsonify(users)
 
-@app.route("/user/create/<username>")
-def create_user(username, methods=['POST']):
+@app.route("/user/create/<username>", methods=['POST'])
+def create_user(username):
     ''' Creates the user received as a parameter in the URL '''
     if username in cached_users:
         abort(ALREADY_EXISTS_ERROR) # Already Exists
@@ -91,7 +95,7 @@ def create_user(username, methods=['POST']):
         # Add the user to the welcome room
         db.join_room(username, 'welcome')
         cached_rooms['welcome'].add(username)
-        return jsonify({username: ['welcome']})
+        return jsonify({"username": username, "joined_rooms": ['welcome']})
 
 @app.route("/user/delete/<username>")
 def delete_user(username):
@@ -185,8 +189,8 @@ def list_rooms():
     rooms = [{'room': room} for room in cached_rooms]
     return jsonify(rooms)
 
-@app.route("/room/create/<roomname>")
-def create_room(roomname, methods=['POST']):
+@app.route("/room/create/<roomname>", methods=['POST'])
+def create_room(roomname,):
     ''' Creates the room received as a parameter in the URL '''
     if roomname in cached_rooms:
         abort(ALREADY_EXISTS_ERROR) # Already Exists
@@ -210,17 +214,47 @@ def delete_room(roomname):
 
 ### Messages ###
 @app.route("/message/get/<roomname>")
-def get_room_messages(roomname):
+def get_messages(roomname):
     ''' Gets all the messages from a room '''
     # FIXME: Migrate all of this to WebSocket so we can push to the client directly?
     if roomname not in cached_rooms or roomname not in cached_messages:
         abort(NOT_FOUND_ERROR)
     else:
-        messages = cached_messages[rooname]  # TODO: Think about how we refresh this cache... it should be kept in sync by us manually, no need to call back to the db
-        json_messages = [{'id': message.id, 'username': message.username, 'contents': contents, 'timestamp': message.timestamp} for message in messages]
-        return jsonify({ 'roomname': roomname, 'messages': messages })
+        messages = cached_messages[roomname]  # TODO: Think about how we refresh this cache... it should be kept in sync by us manually, no need to call back to the db
+        json_messages = [{'offset': message.offset, 'username': message.username, 'content': message.content, 'timestamp': int(datetime.timestamp(message.timestamp)) } for message in messages]
+        return jsonify({ 'roomname': roomname, 'messages': json_messages})
 
-# TODO: Think about a function that returns the *NEW* messages (maybe using the id variable, since it is a autoincrementing INTEGER?)
+@app.route("/message/send/<roomname>", methods=['GET', 'POST'])
+def send_message(roomname):
+    ''' Send a message '''
+    message = request.json["message"]
+    if "username" not in message and \
+       "roomname" not in message and \
+       "content" not in message and \
+       "timestamp" not in message:
+           abort(UNPROCESSABLE_ENTITY_ERROR)
+    elif message["roomname"] not in cached_rooms or \
+         message["username"] not in cached_users:
+             abort(NOT_FOUND_ERROR)
+    elif message["username"] not in cached_rooms[message["roomname"]]:
+        abort(UNAUTHORIZED_ERROR)
+    else:
+        # Well formed message, send it!
+        timestamp = datetime.fromtimestamp(message["timestamp"])
+        this_offset = room_offsets[message["roomname"]] + 1
+        sent_message = Message(offset=this_offset, roomname=message["roomname"],
+                               username=message["username"], content=message["content"],
+                               timestamp=timestamp)
+        print(f'Trying to send message {message} and the offset is {room_offsets[message["roomname"]]}')
+        if not db.send_message(sent_message):
+            abort(INTERNAL_SERVER_ERROR)
+        else:
+            # Successfully saved the message to the db
+            room_offsets[message["roomname"]] = this_offset
+            cached_messages[message["roomname"]].append(sent_message)
+
+    return jsonify({'status': 200}) # What to send back here?
+# TODO: Think about a function that returns the *NEW* messages (maybe using the offset variable, since it is a autoincrementing INTEGER?)
 
 
 ### Error Handlers ###
@@ -235,6 +269,11 @@ def error_already_exists(error):
 @app.errorhandler(INTERNAL_SERVER_ERROR)
 def error_already_exists(error):
     return make_response(jsonify({'code': error.code, 'description': error.description}), INTERNAL_SERVER_ERROR)
+
+@app.errorhandler(UNAUTHORIZED_ERROR)
+def error_unauthorized(error):
+    return make_response(jsonify({'code': error.code, 'description': error.description}), UNAUTHORIZED_ERROR)
+
 ### Init ###
 def init_server():
     ''' This initializes the server to bootstrap the DB and some basic data '''

@@ -21,11 +21,16 @@ TABLE joined_rooms:
 This table shows which rooms has a user joined
 
 TABLE messages:
- id (INTEGER) | room (TEXT) | username (TEXT) | message (TEXT) | timestamp (DATETIME)
-This table stores every message, with its corresponding username, room and timestamp
+ offset (INTEGER) | room (TEXT) | username (TEXT) | message (TEXT) | timestamp (DATETIME)
+This table stores every message in a room, with its corresponding offset, username, room and timestamp
 '''
 import sqlite3 as sqlite
+from collections import namedtuple
 from datetime import datetime
+
+# named tuple as message?
+# Fields: (offset room PK) user content timestamp
+Message = namedtuple('Message', ['offset', 'roomname', 'username', 'content', 'timestamp'])
 
 class DB:
     def __init__(self):
@@ -61,11 +66,12 @@ class DB:
                        ('alvaroc', 'welcome'),
                        ('test_user', 'welcome')''')
         cur.execute('''CREATE TABLE IF NOT EXISTS messages
-                       (id INTEGER PRIMARY KEY,
+                       (offset INTEGER,
                         roomname TEXT,
                         username TEXT,
-                        message  TEXT,
+                        content  TEXT,
                         timestamp TIMESTAMP,
+                        PRIMARY KEY (offset, roomname),
                         FOREIGN KEY (username) REFERENCES users(name),
                         FOREIGN KEY (roomname) REFERENCES rooms(name))''')
         self.con.commit()
@@ -202,8 +208,31 @@ class DB:
             return False
         return True
 
+    ### Messages ### 
+    def get_room_messages(self, room):
+        ''' Gets all the stored messages from this room '''
+        cur = self.con.cursor()
+        cur.execute('''SELECT *
+                       FROM messages
+                       WHERE roomname = ?''',(room,))
+        messages = [Message(offset=offset, roomname=roomname, username=username, 
+                            content=content, timestamp=ts) \
+                    for offset, roomname, username, content, ts in cur.fetchall()]
+        return messages
 
-
+    def send_message(self, message):
+        ''' Send a message '''
+        cur = self.con.cursor()
+        try:
+            cur.execute('''INSERT INTO messages (offset, roomname, username, content, timestamp)
+                       VALUES (?, ?, ?, ?, ?)''', (message.offset, message.roomname,
+                                                   message.username, message.content,
+                                                   message.timestamp))
+            self.con.commit()
+        except sqlite.Error as e:
+            print(f'Error sending message {message} in room {message.roomname}: {e}')
+            return -1
+        return True
     def close(self):
         self.con.close()
 
@@ -211,7 +240,7 @@ class DB:
 db = None
 def init_db():
     '''
-    this function creates the SQLite
+    this function creates the SQLite instance
     '''
     db = DB()
     db.test()
